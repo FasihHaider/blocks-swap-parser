@@ -1,0 +1,56 @@
+type Transfer {
+  # id is the transaction hash + log index
+  id: ID!
+  # transaction hash
+  txHash: String!
+  # token contract address
+  token: String!
+  # token decimals
+  decimals: Int!
+  # from address
+  from: String!
+  # to address
+  to: String!
+  # amount transferred
+  amount: BigInt!
+}
+
+type Block {
+  # block number
+  id: ID!
+  # block number
+  number: BigInt!
+  # block hash
+  hash: String!
+  # block timestamp
+  timestamp: BigInt!
+  # number of transactions in the block
+  txCount: Int!
+  # transaction hashes in the block (comma-separated)
+  txHashes: String!
+}
+
+type Swap {
+  # id is the transaction hash
+  id: ID!
+  # transaction hash
+  txHash: String!
+  # swapper address (the address that performed the swap)
+  swapper: String!
+  # input token address
+  tokenIn: String!
+  # input token decimals
+  tokenInDecimals: Int!
+  # input amount
+  amountIn: BigInt!
+  # output token address
+  tokenOut: String!
+  # output token decimals
+  tokenOutDecimals: Int!
+  # output amount
+  amountOut: BigInt!
+  # block number
+  blockNumber: BigInt!
+  # block timestamp
+  timestamp: BigInt!
+}
