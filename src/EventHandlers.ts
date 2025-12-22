@@ -189,8 +189,8 @@ onBlock(
             }
 
             // A swap occurs when an address has:
-            // 1. First send event (first transfer where they sent a token)
-            // 2. Last receive event (last transfer where they received a token)
+            // 1. First send event (first transfer where they sent a token) = token they're giving up = tokenIn
+            // 2. Last receive event (last transfer where they received a token) = token they're receiving = tokenOut
             // 3. Different tokens in first send and last receive
             // 4. First send happened before last receive
             if (
@@ -202,15 +202,17 @@ onBlock(
               swapEvent.firstSendIndex < swapEvent.lastReceiveIndex
             ) {
               // Collect this swapper
+              // Fix: tokenIn should be what they received (the token coming IN to them)
+              // tokenOut should be what they sent (the token going OUT from them)
               swappers.push({
                 address,
                 tokenIn: {
-                  token: swapEvent.firstSendToken,
-                  amount: swapEvent.firstSendAmount,
+                  token: swapEvent.lastReceiveToken,  // Token they received = input token (coming in)
+                  amount: swapEvent.lastReceiveAmount,
                 },
                 tokenOut: {
-                  token: swapEvent.lastReceiveToken,
-                  amount: swapEvent.lastReceiveAmount,
+                  token: swapEvent.firstSendToken,  // Token they sent = output token (going out)
+                  amount: swapEvent.firstSendAmount,
                 },
               });
             }
