@@ -71,91 +71,183 @@ onBlock(
             continue;
           }
 
-          // Calculate net token changes per address
-          // Map: address -> token -> net change (positive = gained, negative = lost)
-          const netChanges = new Map<string, Map<string, bigint>>();
-
-          // Process all transfers to calculate net changes
+          // Collect all token contract addresses (these are contracts we should exclude)
+          const tokenContracts = new Set<string>();
           for (const transfer of transfers) {
+            tokenContracts.add(transfer.token.toLowerCase());
+          }
+
+          // Track addresses that appear as intermediaries (both send and receive the same token)
+          // This helps identify pool/router contracts
+          const intermediaryAddresses = new Set<string>();
+          const addressTokenTransfers = new Map<string, Map<string, { sent: bigint; received: bigint }>>();
+
+          // Track first send and last receive per address
+          // Map: address -> { firstSendIndex, firstSendToken, firstSendAmount, lastReceiveIndex, lastReceiveToken, lastReceiveAmount }
+          const addressSwapEvents = new Map<string, {
+            firstSendIndex: number | null;
+            firstSendToken: string | null;
+            firstSendAmount: bigint;
+            lastReceiveIndex: number | null;
+            lastReceiveToken: string | null;
+            lastReceiveAmount: bigint;
+          }>();
+
+          // Process transfers in order to find first send and last receive
+          for (let i = 0; i < transfers.length; i++) {
+            const transfer = transfers[i];
             const from = transfer.from.toLowerCase();
             const to = transfer.to.toLowerCase();
             const token = transfer.token.toLowerCase();
             const amount = BigInt(transfer.amount);
 
-            // Decrease balance for sender
-            if (!netChanges.has(from)) {
-              netChanges.set(from, new Map<string, bigint>());
+            // Track transfers per address per token to identify intermediaries
+            if (!addressTokenTransfers.has(from)) {
+              addressTokenTransfers.set(from, new Map());
             }
-            const fromBalances = netChanges.get(from)!;
-            const currentFromBalance = fromBalances.get(token) || BigInt(0);
-            fromBalances.set(token, currentFromBalance - amount);
+            if (!addressTokenTransfers.has(to)) {
+              addressTokenTransfers.set(to, new Map());
+            }
 
-            // Increase balance for receiver
-            if (!netChanges.has(to)) {
-              netChanges.set(to, new Map<string, bigint>());
+            const fromTransfers = addressTokenTransfers.get(from)!;
+            const toTransfers = addressTokenTransfers.get(to)!;
+
+            if (!fromTransfers.has(token)) {
+              fromTransfers.set(token, { sent: BigInt(0), received: BigInt(0) });
             }
-            const toBalances = netChanges.get(to)!;
-            const currentToBalance = toBalances.get(token) || BigInt(0);
-            toBalances.set(token, currentToBalance + amount);
+            if (!toTransfers.has(token)) {
+              toTransfers.set(token, { sent: BigInt(0), received: BigInt(0) });
+            }
+
+            fromTransfers.get(token)!.sent += amount;
+            toTransfers.get(token)!.received += amount;
+
+            // Track first send for 'from' address
+            if (!addressSwapEvents.has(from)) {
+              addressSwapEvents.set(from, {
+                firstSendIndex: null,
+                firstSendToken: null,
+                firstSendAmount: BigInt(0),
+                lastReceiveIndex: null,
+                lastReceiveToken: null,
+                lastReceiveAmount: BigInt(0),
+              });
+            }
+            const fromSwapEvent = addressSwapEvents.get(from)!;
+            // Record the first time this address sends a token
+            if (fromSwapEvent.firstSendIndex === null) {
+              fromSwapEvent.firstSendIndex = i;
+              fromSwapEvent.firstSendToken = token;
+              fromSwapEvent.firstSendAmount = amount;
+            }
+
+            // Track last receive for 'to' address
+            if (!addressSwapEvents.has(to)) {
+              addressSwapEvents.set(to, {
+                firstSendIndex: null,
+                firstSendToken: null,
+                firstSendAmount: BigInt(0),
+                lastReceiveIndex: null,
+                lastReceiveToken: null,
+                lastReceiveAmount: BigInt(0),
+              });
+            }
+            const toSwapEvent = addressSwapEvents.get(to)!;
+            // Always update last receive (it's the most recent receive)
+            toSwapEvent.lastReceiveIndex = i;
+            toSwapEvent.lastReceiveToken = token;
+            toSwapEvent.lastReceiveAmount = amount;
           }
 
-          // Detect swap patterns: addresses that lost one token and gained another
-          for (const [address, tokenBalances] of netChanges.entries()) {
-            const tokensLost: Array<{ token: string; amount: bigint }> = [];
-            const tokensGained: Array<{ token: string; amount: bigint }> = [];
-
-            // Separate tokens into lost (negative net) and gained (positive net)
-            for (const [token, netChange] of tokenBalances.entries()) {
-              if (netChange < 0) {
-                // Address lost this token (sent more than received)
-                tokensLost.push({ token, amount: -netChange }); // Convert to positive amount
-              } else if (netChange > 0) {
-                // Address gained this token (received more than sent)
-                tokensGained.push({ token, amount: netChange });
+          // Identify intermediary addresses (contracts that both send and receive the same token)
+          for (const [address, tokenTransfers] of addressTokenTransfers.entries()) {
+            for (const [token, transfers] of tokenTransfers.entries()) {
+              // If an address both sent and received the same token, it's likely an intermediary
+              if (transfers.sent > BigInt(0) && transfers.received > BigInt(0)) {
+                intermediaryAddresses.add(address);
               }
-              // If netChange === 0, the address broke even (not a swap)
+            }
+          }
+
+          // Detect swap patterns: first send and last receive must be different tokens
+          // Collect all swappers in this transaction first
+          const swappers: Array<{
+            address: string;
+            tokenIn: { token: string; amount: bigint };
+            tokenOut: { token: string; amount: bigint };
+          }> = [];
+
+          for (const [address, swapEvent] of addressSwapEvents.entries()) {
+            // Skip token contracts (they appear as token addresses in transfers)
+            if (tokenContracts.has(address)) {
+              continue;
             }
 
-            // A swap occurs when an address lost at least one token and gained at least one different token
-            if (tokensLost.length > 0 && tokensGained.length > 0) {
-              // Match the first lost token with the first gained token
-              // In complex swaps, there might be multiple pairs, but we'll capture the primary one
-              const tokenIn = tokensLost[0];
-              const tokenOut = tokensGained[0];
-
-              // Skip if somehow the same token (shouldn't happen, but safety check)
-              if (tokenIn.token === tokenOut.token) {
-                continue;
-              }
-
-              // Get token decimals
-              const tokenInDecimals = await context.effect(
-                getTokenDecimals,
-                tokenIn.token
-              );
-              const tokenOutDecimals = await context.effect(
-                getTokenDecimals,
-                tokenOut.token
-              );
-
-              // Create swap entity
-              const swap: Swap = {
-                id: `${txHash}-${address}`,
-                txHash: txHash,
-                swapper: address,
-                tokenIn: tokenIn.token,
-                tokenInDecimals: tokenInDecimals,
-                amountIn: tokenIn.amount,
-                tokenOut: tokenOut.token,
-                tokenOutDecimals: tokenOutDecimals,
-                amountOut: tokenOut.amount,
-                blockNumber: BigInt(block.number),
-                timestamp: BigInt(blockData.timestamp),
-              };
-
-              context.Swap.set(swap);
-              swapCount++;
+            // Skip intermediary contracts (addresses that both send and receive the same token)
+            if (intermediaryAddresses.has(address)) {
+              continue;
             }
+
+            // A swap occurs when an address has:
+            // 1. First send event (first transfer where they sent a token)
+            // 2. Last receive event (last transfer where they received a token)
+            // 3. Different tokens in first send and last receive
+            // 4. First send happened before last receive
+            if (
+              swapEvent.firstSendIndex !== null &&
+              swapEvent.firstSendToken !== null &&
+              swapEvent.lastReceiveIndex !== null &&
+              swapEvent.lastReceiveToken !== null &&
+              swapEvent.firstSendToken !== swapEvent.lastReceiveToken &&
+              swapEvent.firstSendIndex < swapEvent.lastReceiveIndex
+            ) {
+              // Collect this swapper
+              swappers.push({
+                address,
+                tokenIn: {
+                  token: swapEvent.firstSendToken,
+                  amount: swapEvent.firstSendAmount,
+                },
+                tokenOut: {
+                  token: swapEvent.lastReceiveToken,
+                  amount: swapEvent.lastReceiveAmount,
+                },
+              });
+            }
+          }
+
+          // Create only one Swap entity per transaction
+          // Use the first swapper's token pair
+          if (swappers.length > 0) {
+            const primarySwapper = swappers[0];
+
+            // Get token decimals (use primary swapper's tokens)
+            const tokenInDecimals = await context.effect(
+              getTokenDecimals,
+              primarySwapper.tokenIn.token
+            );
+            const tokenOutDecimals = await context.effect(
+              getTokenDecimals,
+              primarySwapper.tokenOut.token
+            );
+
+            // Create swap entity (one per transaction)
+            const swap: Swap = {
+              id: txHash, // Use transaction hash as ID (one swap per tx)
+              txHash: txHash,
+              swapper: primarySwapper.address,
+              tokenIn: primarySwapper.tokenIn.token,
+              tokenInDecimals: tokenInDecimals,
+              amountIn: primarySwapper.tokenIn.amount,
+              tokenOut: primarySwapper.tokenOut.token,
+              tokenOutDecimals: tokenOutDecimals,
+              amountOut: primarySwapper.tokenOut.amount,
+              blockNumber: BigInt(block.number),
+              timestamp: BigInt(blockData.timestamp),
+            };
+
+            context.Swap.set(swap);
+            swapCount++;
           }
         } catch (error) {
           context.log.error(
