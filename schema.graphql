@@ -1,12 +1,19 @@
+type Token {
+  # token contract address
+  id: ID!
+  # token symbol
+  symbol: String!
+  # token decimals
+  decimals: Int!
+}
+
 type Transfer {
   # id is the transaction hash + log index
   id: ID!
   # transaction hash
   txHash: String!
   # token contract address
-  token: String!
-  # token decimals
-  decimals: Int!
+  token_id: String!
   # from address
   from: String!
   # to address
